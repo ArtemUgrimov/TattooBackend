@@ -1,0 +1,1 @@
+This is set of microservices to maintain frontend of appropriate mobile App
