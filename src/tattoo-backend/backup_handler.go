@@ -30,5 +30,5 @@ func backupHandler(c echo.Context) error {
 		return err
 	}
 
-	return c.String(http.StatusOK, "OK")
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
