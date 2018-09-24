@@ -8,9 +8,12 @@ import (
 func main() {
 	e := echo.New()
 	e.Use(middleware.Logger())
-
+	e.GET("/status", statusHandler)
+	e.POST("/login", loginHandler)
+	e.POST("/logout", logoutHandler)
 	e.POST("/backup", backupHandler)
-	e.File("/restore", "db_backup.db")
+	e.POST("/remove_backup", reomveBackupHandler)
+	e.GET("/restore", restoreHandler)
 
 	e.Logger.Fatal(e.Start(":8000"))
 }

@@ -1,0 +1,239 @@
+#!/usr/bin/env groovy
+import groovy.json.JsonSlurper
+
+properties([
+  parameters([
+    string(defaultValue: "10.51.0.13", description: 'Enter LineServer IP', name: 'ENV_LOOKUP'),
+    [$class: 'CascadeChoiceParameter', choiceType: 'PT_SINGLE_SELECT',
+      name: 'LINESERVER_ARTIFACT', description: '', referencedParameters: '', randomName: 'choice-parameter-LINESERVER_ARTIFACT-dev',
+      filterable: true, filterLength: 1,
+      script: [ $class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: 'return["none"]' ],
+        script: [ classpath: [], sandbox: false, 
+          script: '''import groovy.json.JsonSlurper
+            def url = new URL("http://artifactory.sbtech.com/artifactory/api/search/aql")
+            def query = 'items.find({"@build.name":{"$match":"PointOfPresence :: * :: artifact :: LineServer_artifact"}}).include("name", "repo", "path", "created", "artifact.module.build.@buildInfo.env.BUILD_ID", "artifact.module.build.@buildInfo.env.GIT_BRANCH", "artifact.module.build.@buildInfo.env.BRANCH_NAME")'
+            def authPair = 'rest.api:rest.api'.bytes.encodeBase64().toString()
+            def conn = url.openConnection()
+            conn.setRequestMethod("POST")
+            conn.doOutput = true
+            conn.setRequestProperty("Authorization", "Basic ${authPair}")
+            conn.setRequestProperty("Content-Type", "text/plain")
+            conn.setRequestProperty("Accept", "application/json")
+            try {
+                def writer = new OutputStreamWriter(conn.outputStream)
+                writer.write(query)
+                writer.flush()
+                writer.close()
+            } catch (all) {
+                return ['[Error] Post request']
+            }
+            try {
+                conn.connect()
+            } catch (all) {
+                return ['[Error] Connecting to AF']
+            }
+            def response = conn.responseCode
+            if (response == 200){
+                def reslist = []
+                def json =  new JsonSlurper().parseText(conn.content.text)
+                json.results?.each { 
+                    def git_branch
+                    def build_id
+                    it.artifacts[0].modules[0]?.builds[0]?.'build.properties'?.each{ buildProp ->
+                        if (buildProp.'build.property.key'?.equalsIgnoreCase('buildInfo.env.GIT_BRANCH') || buildProp.'build.property.key'?.equalsIgnoreCase('buildInfo.env.BRANCH_NAME')){
+                            git_branch = buildProp.'build.property.value'.trim()
+                        }
+                        if (buildProp.'build.property.key'?.equalsIgnoreCase('buildInfo.env.BUILD_ID')){
+                            build_id = buildProp.'build.property.value'.trim()
+                        }
+                    }
+                    reslist = [*reslist, "Build:${build_id} Branch:${git_branch}".toString()]
+                }
+                reslist.add(':selected')
+                reslist.sort().reverse()
+                return reslist
+            }
+            return ["[Error] AF returned: ${response}"]'''
+        ]
+      ]
+    ],
+    [$class: 'CascadeChoiceParameter', choiceType: 'PT_SINGLE_SELECT',
+      name: 'CMS_DB_BACKUP', description: 'Name of the CMS DB backup file', referencedParameters: '', randomName: 'choice-parameter-CMS_DB_BACKUP-dev',
+      filterable: true, filterLength: 1,
+      script: [$class: 'GroovyScript',fallbackScript: [classpath: [], sandbox: false, script: 'return["Error"]'],
+        script: [classpath: [], sandbox: false, 
+          script: '''
+            import groovy.json.JsonSlurper
+            def project = 'PointOfPresence'
+            def repo = 'CMSDB'
+            def authPair = 'rest.api:rest.api'.bytes.encodeBase64().toString()
+            def url = new URL('http://artifactory.sbtech.com/artifactory/api/search/pattern?pattern=' + URLEncoder.encode(project) + ':' + URLEncoder.encode(repo) +'/*.bak')
+            def connection = url.openConnection()
+            connection.setRequestProperty("Authorization", "Basic ${authPair}")
+            try {
+              connection.connect()
+            } catch (all) {
+              return ['Error connect']
+            }
+
+            if (connection.getResponseCode() == 200) {
+              def json = connection.inputStream.withCloseable { inStream ->
+                new JsonSlurper().parse(inStream as InputStream)
+              }
+              def resList = []
+              json.files.each { f ->
+                nakedFileName = f.replaceAll(/^\\//, '').replaceAll(/\\.bak$/, '').replaceAll(/^CMSDB\\//, '')
+                resList.add(nakedFileName)
+              }
+              return resList.sort()
+            } else {
+              return ['Can\\'t retrieve list of CMS backups']
+            }
+          '''
+        ]
+      ]
+    ]
+  ])
+])
+pipeline {
+  agent {
+    node {
+      label 'visual-studio-2017 && !il && !do_not_use'
+    }
+  }
+  options {
+    skipDefaultCheckout true
+    timestamps()
+  }
+  stages {
+    stage('Get Artifact') {
+      steps {
+        script {
+          if ( params.LINESERVER_ARTIFACT && params.ENV_LOOKUP ) {
+            def build_id = params.LINESERVER_ARTIFACT.toString().split(' ')[0].split(':')[1]
+            def branchName = params.LINESERVER_ARTIFACT.toString().split(' ')[1].split(':')[1]
+            def artifactName = 'LineServer_artifact'
+            env.INST_IP = params.ENV_LOOKUP
+
+            currentBuild.displayName = "#${BUILD_NUMBER} ${artifactName.split('_')[0]} deploy"
+            currentBuild.description = "#${build_id} ${branchName} [${env.NODE_NAME}]"
+            
+            def url = new URL('http://artifactory.sbtech.com/artifactory/api/search/aql')
+            def query = """items.find({"@build.name":{"\$match":"PointOfPresence :: * :: artifact :: ${artifactName}"}},{"@build.number":{"\$eq":"${build_id}"}},{"@branch":{"\$eq":"${branchName}"}}).include("name", "repo", "path")"""
+            def authPair = 'rest.api:rest.api'.bytes.encodeBase64().toString()
+            def conn = url.openConnection()
+            conn.setRequestMethod('POST')
+            conn.doOutput = true
+            conn.setRequestProperty('Authorization', "Basic ${authPair}")
+            conn.setRequestProperty("Content-Type", "text/plain")
+            conn.setRequestProperty('Accept', 'application/json');
+            try {
+                def writer = new OutputStreamWriter(conn.outputStream)
+                writer.write(query)
+                writer.flush()
+                writer.close()
+            } catch (all) {
+                error('Failed to write to AF')
+            }
+            try {
+                conn.connect()
+            } catch (all) {
+                error('Failed to read from AF')
+            }
+            def response = conn.responseCode
+            if (response == 200) {
+                def json = new groovy.json.JsonSlurper().parseText(conn.content.text)
+                env.ART_URL = "https://artifactory.sbtech.com/artifactory/${json.results[0].repo}/${json.results[0].path}/${json.results[0].name}"
+            } else { 
+                error("Response from AF: ${response}")
+            }
+          } else { 
+            error('LINESERVER_ARTIFACT or ENV_LOOKUP not selected. Nothing to do.')
+          }
+        }
+      }
+    }
+    stage('Download & unzip') {
+      steps {
+        echo "[INFO] Artifact url: ${env.ART_URL}"
+        echo "[INFO] Deploy to: ${env.INST_IP}"
+        script {
+          def artifactFileName = env.ART_URL.tokenize('/').last()
+          httpRequest url: "${env.ART_URL}", outputFile: "${artifactFileName}", ignoreSslErrors: true, responseHandle: 'NONE'
+          unzip zipFile: "${artifactFileName}", dir: './publish'
+        }
+      }
+    }
+    stage('Configure \'lineserver.SetParameters.xml\'') {
+      steps {
+        script {
+          if ( fileExists ('./publish/lineserver.SetParameters.xml') ) {
+            dir('./publish') {
+              retry(3) {
+
+                echo "[Info] Download msdeploy-merge-params.exe tool"
+                httpRequest url: 'http://artifactory.sbtech.com:8081/artifactory/SBTech-tools/MSDeploy/web_config_merge.exe', outputFile: 'web_config_merge.exe', ignoreSslErrors: true, responseHandle: 'NONE'
+
+                def retstat = bat(
+                  script: "web_config_merge.exe --package \"lineserver\" --environment \"BTI\" --consul_host \"${env.INST_IP}:8500\""
+                )
+
+                def paramsFile = 'lineserver.SetParameters.xml'
+                def outFile = paramsFile.replace('.xml',".BTI.xml")
+                def inFile = readFile file: paramsFile, encoding : 'utf-8'
+                def CMSDBName = ''
+                if (params.CMS_DB_BACKUP) {
+                  CMSDBName = params.CMS_DB_BACKUP.replaceAll(/_\d{8}$/, '')
+                }
+                def result = inFile.replaceAll(/\{Environment_Number\}/, 'BTI').replaceAll(/\{CMS_DB_Name\}/, CMSDBName)
+                if (inFile == result) {
+                  echo "Nothing to replace !"
+                }
+                result = result.substring(result.indexOf('<?xml'))
+                writeFile file: outFile, text: result, encoding : 'utf-8'
+              }
+            }
+          }
+          else
+          {
+            error('Parameters file lineserver.SetParameters.xml does not exists')
+          }
+        }
+      }
+    }
+
+    stage('Deploy') {
+      steps {
+        script {
+          if ( fileExists ('./publish/lineserver.deploy.cmd') ) {
+            dir('./publish') {
+              retry(3) {
+                withCredentials([usernamePassword(credentialsId: 'ce8d2fb4-7ec8-4f49-acb7-a0dd38f3059c', passwordVariable: 'PASSWORD', usernameVariable: 'USERNAME')]) {
+                  withEnv(["_DeploySetParametersFile=${env.WORKSPACE}\\publish\\lineserver.SetParameters.BTI.xml"]) {
+                    def retstat = bat(
+                      script: "lineserver.deploy.cmd /Y /M:https://${env.INST_IP}:8172/msdeploy.axd /A:Basic /U:\"${env.USERNAME}\" /P:\"${env.PASSWORD}\" -allowUntrusted -retryAttempts:5",
+                      returnStdout: true
+                    )
+                    println (retstat)
+                    if ( retstat.contains('ERROR_FILE_IN_USE') ) {
+                      sleep(10)
+                      error('FILES_IN_USE')
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            error('Deploy script lineserver.deploy.cmd does not exists')
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      deleteDir()
+      cleanWs()
+    }
+  }
+}
